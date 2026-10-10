@@ -1,0 +1,8 @@
+typer[all]==0.12.3
+scapy==2.5.0
+selenium==4.15.2
+playwright==1.40.0
+requests==2.31.0
+geoip2==4.8.0
+python-dotenv==1.0.0
+rich==13.7.0
