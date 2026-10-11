@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Secrets and session data
+.env
+sessions/
+*.mmdb
+
+# Node
+node_modules/
+
+# Editor
+.kilo/
+.mcp.json
