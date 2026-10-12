@@ -83,14 +83,15 @@ class PacketCaptureEngine:
                 sport = packet[UDP].sport
                 dport = packet[UDP].dport
 
-                if sport in STUN_PORTS or dport in STUN_PORTS:
-                    if not packet.haslayer(Raw):
+                if not packet.haslayer(Raw):
+                    if sport in STUN_PORTS or dport in STUN_PORTS:
                         stun_packets.append(packet)
-                        continue
-                    payload = bytes(packet[Raw].load)
-                    if len(payload) >= 8 and payload[4:8] == STUN_MAGIC_COOKIE:
-                        stun_packets.append(packet)
-                    elif len(payload) >= 4 and (payload[0] & 0xC0) == 0x40:
+                    continue
+                payload = bytes(packet[Raw].load)
+                if len(payload) >= 8 and payload[4:8] == STUN_MAGIC_COOKIE:
+                    stun_packets.append(packet)
+                elif sport in STUN_PORTS or dport in STUN_PORTS:
+                    if len(payload) >= 4 and (payload[0] & 0xC0) == 0x40:
                         stun_packets.append(packet)
 
         self._stun_packets = stun_packets

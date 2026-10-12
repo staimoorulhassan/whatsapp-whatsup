@@ -178,8 +178,7 @@ class IPExtractor:
         if not counts:
             return []
 
-        best = max(counts.values())
-        return [ip for ip, n in counts.items() if n == best]
+        return sorted(counts, key=counts.get, reverse=True)
 
     def _ip_layer(self, packet):
         from scapy.all import IP, IPv6
