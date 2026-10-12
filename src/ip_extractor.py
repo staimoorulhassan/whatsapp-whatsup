@@ -12,7 +12,16 @@ STUN_ATTR_XOR_MAPPED_ADDRESS = 0x0020
 STUN_ATTR_SOURCE_ADDRESS = 0x0002
 STUN_ATTR_CHANGED_ADDRESS = 0x0004
 STUN_ATTR_REFLECTED_FROM = 0x0008
-STUN_ATTR_XOR_MAPPED_ADDRESS_V6 = 0x0020
+STUN_ATTR_XOR_PEER_ADDRESS = 0x0012
+STUN_ATTR_XOR_RELAYED_ADDRESS = 0x0016
+SERVER_ATTRS = {
+    STUN_ATTR_MAPPED_ADDRESS,
+    STUN_ATTR_SOURCE_ADDRESS,
+    STUN_ATTR_CHANGED_ADDRESS,
+    STUN_ATTR_REFLECTED_FROM,
+    STUN_ATTR_XOR_MAPPED_ADDRESS,
+    STUN_ATTR_XOR_RELAYED_ADDRESS,
+}
 
 
 class IPExtractor:
@@ -39,15 +48,54 @@ class IPExtractor:
             "179.6.0.0/16",      # Meta Brazil infrastructure
             "102.133.0.0/16",    # Meta APAC
             "158.168.0.0/16",    # Meta (secondary)
-            "148.113.0.0/16"     # Meta/Carrier
+            "148.113.0.0/16",    # Meta/Carrier
+            "57.144.0.0/14",     # Meta (AS32934)
+            "57.141.0.0/16",
+            "69.63.176.0/20",
+            "69.171.224.0/19",
+            "66.220.144.0/20",
+            "173.252.64.0/18",
+            "129.134.0.0/16",
+            "163.70.128.0/17",
+            "204.15.20.0/22",
+            "45.64.40.0/22",
+            "103.4.96.0/22",
         ]
 
-        # Corporate/CDN infrastructure IP ranges (4)
+        # DNS, CDN, and well-known STUN/TURN providers. These show up on
+        # every call and are not the remote peer.
         self.corporate_ranges = [
-            "8.8.8.0/24",        # Google DNS
-            "8.8.4.0/24",        # Google DNS secondary
-            "1.1.1.0/24",        # Cloudflare DNS
-            "9.9.9.0/24"         # Quad9 DNS
+            "8.8.8.0/24",
+            "8.8.4.0/24",
+            "1.1.1.0/24",
+            "9.9.9.0/24",
+            "142.250.0.0/15",
+            "172.217.0.0/16",
+            "216.58.192.0/19",
+            "74.125.0.0/16",
+            "173.194.0.0/16",
+            "209.85.128.0/17",
+            "64.233.160.0/19",
+            "66.102.0.0/20",
+            "108.177.0.0/17",
+            "172.253.0.0/16",
+            "142.251.0.0/16",
+            "104.16.0.0/13",
+            "172.64.0.0/13",
+            "162.158.0.0/15",
+            "141.101.64.0/18",
+            "188.114.96.0/20",
+            "190.93.240.0/20",
+            "197.234.240.0/22",
+            "198.41.128.0/17",
+            "173.245.48.0/20",
+            "103.21.244.0/22",
+            "103.22.200.0/22",
+            "103.31.4.0/22",
+            "131.0.72.0/22",
+            "64.68.96.0/19",
+            "216.93.246.0/24",
+            "66.151.32.0/21",
         ]
 
     def classify_ip(self, ip: str) -> str:
@@ -118,22 +166,65 @@ class IPExtractor:
         return list(ips)
 
     def extract_ips_from_stun(self, packets) -> List[str]:
-        """Extract IP addresses from STUN packets."""
+        """Receiver public IP from outbound STUN binding requests.
+
+        The report's leak is the destination of the caller's own binding
+        request during ringing, not XOR-MAPPED-ADDRESS (that is our own NAT
+        mapping) and not a Meta TURN relay.
+        """
         if not packets:
             return []
 
-        ips = set()
-
+        counts: Dict[str, int] = {}
         for packet in packets:
-            # Check for STUN payload first
-            stun_ips = self._extract_from_stun_payload(packet)
-            ips.update(stun_ips)
+            for ip in self._receiver_candidates(packet):
+                counts[ip] = counts.get(ip, 0) + 1
 
-            # Also fall back to header IPs
-            header_ips = self._extract_from_headers(packet)
-            ips.update(header_ips)
+        if not counts:
+            return []
 
-        return list(ips)
+        best = max(counts.values())
+        return [ip for ip, n in counts.items() if n == best]
+
+    def _receiver_candidates(self, packet) -> List[str]:
+        if packet is None or not hasattr(packet, "haslayer"):
+            return []
+        if not (packet.haslayer(IP) and packet.haslayer(UDP) and packet.haslayer(Raw)):
+            return []
+        try:
+            payload = bytes(packet[Raw].load)
+            if len(payload) < 20 or payload[4:8] != STUN_MAGIC_COOKIE:
+                return []
+            msg_type = struct.unpack("!H", payload[:2])[0] & 0x3FFF
+            src = ipaddress.ip_address(packet[IP].src)
+            outbound = src.is_private or src.is_loopback
+            if msg_type == 0x0001 and outbound:
+                return [packet[IP].dst]
+            if msg_type == 0x0101 and not outbound:
+                return [packet[IP].src]
+        except Exception:
+            return []
+        return []
+
+    def _peer_from_headers(self, packet) -> List[str]:
+        """Remote address only. Local source and STUN server ports are not the peer."""
+        if packet is None or not hasattr(packet, "haslayer"):
+            return []
+        if not (packet.haslayer(IP) and packet.haslayer(UDP)):
+            return []
+        try:
+            src = packet[IP].src
+            dst = packet[IP].dst
+            sport = packet[UDP].sport
+            dport = packet[UDP].dport
+            stun_ports = {3478, 3479, 5349, 5350}
+            if sport in stun_ports or dport in stun_ports:
+                return []
+            local = ipaddress.ip_address(src)
+            remote = dst if (local.is_private or local.is_loopback) else src
+            return [remote] if self._is_valid_ip(remote) else []
+        except Exception:
+            return []
 
     def _extract_from_headers(self, packet) -> List[str]:
         """Extract IP addresses from packet IP headers."""
@@ -171,8 +262,8 @@ class IPExtractor:
             if packet.haslayer(UDP) and packet.haslayer(Raw):
                 payload = bytes(packet[Raw].load)
 
-                # Check for STUN magic cookie
-                if len(payload) >= 4 and payload[:4] == STUN_MAGIC_COOKIE:
+                # STUN magic cookie is at bytes 4-8 of the 20-byte header.
+                if len(payload) >= 8 and payload[4:8] == STUN_MAGIC_COOKIE:
                     return self._parse_stun_attributes(payload)
 
             # Also check IP layer for STUN-like traffic
@@ -231,14 +322,9 @@ class IPExtractor:
 
                 attr_data = payload[offset+4:offset+4+attr_length]
 
-                # Check for address attributes
-                if attr_type in (STUN_ATTR_MAPPED_ADDRESS, STUN_ATTR_SOURCE_ADDRESS,
-                                  STUN_ATTR_CHANGED_ADDRESS, STUN_ATTR_REFLECTED_FROM):
-                    ip = self._parse_address_attribute(attr_data, is_xor=False)
-                    if ip:
-                        ips.append(ip)
-
-                elif attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS:
+                if attr_type in SERVER_ATTRS:
+                    pass
+                elif attr_type == STUN_ATTR_XOR_PEER_ADDRESS:
                     ip = self._parse_address_attribute(attr_data, is_xor=True)
                     if ip:
                         ips.append(ip)

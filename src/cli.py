@@ -8,157 +8,159 @@ from typing import Optional, List
 from rich.console import Console
 from rich.table import Table
 
-from src.packet_capture import get_available_interfaces
+from config.settings import CAPTURE_TIMEOUT
+from src.packet_capture import get_available_interfaces, select_best_interface
 from src.orchestrator import WhatsAppHunterOrchestrator
 
 app = typer.Typer()
 console = Console()
 
+
+def resolve_interface(interface: Optional[str]) -> str:
+    if interface:
+        return interface
+    interfaces = get_available_interfaces()
+    if not interfaces:
+        console.print("[red]No network interfaces found[/red]")
+        raise typer.Exit(1)
+    chosen = select_best_interface(interfaces)
+    console.print(f"[cyan]Auto-selected interface: {chosen}[/cyan]")
+    return chosen
+
+
+def map_link(res: dict) -> str:
+    lat = res.get("latitude")
+    lon = res.get("longitude")
+    if lat is None or lon is None:
+        return ""
+    return f"https://www.google.com/maps?q={lat},{lon}"
+
+
+def location_line(ip: str, res: dict) -> str:
+    place = ", ".join(p for p in (res.get("city"), res.get("country")) if p)
+    coords = ""
+    if res.get("latitude") is not None and res.get("longitude") is not None:
+        coords = f" ({res['latitude']}, {res['longitude']})"
+    link = map_link(res)
+    pin = f" {link}" if link else ""
+    return f"{res.get('ip', ip)} - {place}{coords}{pin}"
+
+
+def print_results(title: str, result: dict):
+    if not result["success"]:
+        console.print(f"[red]Error: {result['error']}[/red]")
+        raise typer.Exit(1)
+
+    table = Table(title=title)
+    table.add_column("IP Address", style="red")
+    table.add_column("Place", style="green")
+    table.add_column("Coordinates", style="yellow")
+    table.add_column("Map", style="cyan", overflow="fold")
+
+    for ip, res in result["results"].items():
+        if "error" not in res:
+            coords = ""
+            if res.get("latitude") is not None and res.get("longitude") is not None:
+                coords = f"{res['latitude']}, {res['longitude']}"
+            place = ", ".join(p for p in (res.get("city"), res.get("country")) if p) or "Unknown"
+            table.add_row(res.get("ip", ip), place, coords or "n/a", map_link(res) or "n/a")
+
+    console.print(table)
+    console.print(f"\n[green]Found {result['ips_found']} IP(s)[/green]")
+
+
 @app.command()
 def hunt(
     phone_number: str = typer.Argument(..., help="Target phone number in international format (+CountryNumber)"),
-    capture_time: int = typer.Option(5, "--seconds", "-t", help="Capture duration in seconds"),
+    capture_time: int = typer.Option(CAPTURE_TIMEOUT, "--seconds", "-t", help="Capture duration in seconds"),
     interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use"),
-    headless: bool = typer.Option(True, "--head/--no-head", help="Run browser in headless mode")
 ):
-    """Main IP hunting command"""
+    """Capture while you call this number from the WhatsApp Desktop app."""
+    chosen = resolve_interface(interface)
 
-    # Get available interfaces if none specified
-    if not interface:
-        interfaces = get_available_interfaces()
-        if not interfaces:
-            console.print("[red]No network interfaces found[/red]")
-            raise typer.Exit(1)
+    async def run():
+        orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
+        print_results("IP Hunt Results", await orchestrator.run_hunt(phone_number, capture_time))
 
-        # Prefer WiFi interface for capturing WhatsApp traffic
-        # Look for interface with WiFi/WLAN in description or 192.168.x.x private IP
-        wifi_iface = next(
-            (iface for iface, desc in interfaces.items() 
-             if ("WiFi" in desc or "WLAN" in desc or "192.168." in desc) and "0.0.0.0" not in desc), None
-        )
-        if wifi_iface:
-            interface = wifi_iface
-        else:
-            # Fallback: use first non-loopback interface with a real IP (not 0.0.0.0)
-            for iface, desc in interfaces.items():
-                if not iface.startswith("lo") and "0.0.0.0" not in desc:
-                    interface = iface
-                    break
-            if not interface:
-                interface = list(interfaces.keys())[0]
+    asyncio.run(run())
 
-        console.print(f"[cyan]Auto-selected interface: {interface}[/cyan]")
 
-    async def run_hunt():
-        orchestrator = WhatsAppHunterOrchestrator(interface=interface, headless=headless)
-        result = await orchestrator.run_hunt(phone_number, capture_time)
+@app.command()
+def capture(
+    capture_time: int = typer.Option(CAPTURE_TIMEOUT, "--seconds", "-t", help="Capture window in seconds"),
+    interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use"),
+):
+    """Capture while you place a call from the WhatsApp Desktop app."""
+    chosen = resolve_interface(interface)
 
-        if result["success"]:
-            # Display results - geo_results is a dict {ip: {country, city, ...}}
-            table = Table(title="IP Hunt Results")
-            table.add_column("IP Address", style="red")
-            table.add_column("Country", style="green")
-            table.add_column("Region", style="blue")
-            table.add_column("City", style="yellow")
+    async def run():
+        orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
+        print_results("Captured IP Results", await orchestrator.run_capture(capture_time))
 
-            for ip, res in result["results"].items():
-                if "error" not in res:
-                    table.add_row(
-                        res.get("ip", ip),
-                        res.get("country", "Unknown"),
-                        res.get("country_code", "Unknown"),
-                        res.get("city", "Unknown")
-                    )
+    asyncio.run(run())
 
-            console.print(table)
-            console.print(f"\n[green]Found {result['ips_found']} IP(s)[/green]")
-        else:
-            console.print(f"[red]Error: {result['error']}[/red]")
-            raise typer.Exit(1)
-
-    asyncio.run(run_hunt())
 
 @app.command()
 def bulk_hunt(
     phone_numbers: List[str] = typer.Argument(..., help="Multiple phone numbers"),
-    capture_time: int = typer.Option(3, "--seconds", "-t", help="Capture duration per target"),
-    interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use")
+    capture_time: int = typer.Option(CAPTURE_TIMEOUT, "--seconds", "-t", help="Capture duration per target"),
+    interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use"),
 ):
-    """Bulk hunt multiple targets simultaneously"""
+    """Hunt several numbers, one desktop-app call at a time."""
+    chosen = resolve_interface(interface)
 
-    if not interface:
-        interfaces = get_available_interfaces()
-        wifi_iface = next(
-            (iface for iface, desc in interfaces.items() 
-             if ("WiFi" in desc or "WLAN" in desc or "192.168." in desc) and "0.0.0.0" not in desc), None
-        )
-        if wifi_iface:
-            interface = wifi_iface
-        else:
-            interface = next((iface for iface in interfaces.keys() if not iface.startswith("lo") and "0.0.0.0" not in interfaces[iface]), list(interfaces.keys())[0])
-
-    async def run_bulk():
-        orchestrator = WhatsAppHunterOrchestrator(interface=interface, headless=True)
+    async def run():
+        orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
         result = await orchestrator.run_bulk_hunt(phone_numbers, capture_time)
-
-        if result["success"]:
-            for item in result["results"]:
-                phone = item["phone"]
-                res = item["result"]
-                console.print(f"\n[cyan]{phone}:[/cyan]")
-                if res["success"]:
-                    for ip, ip_res in res["results"].items():
-                        if "error" not in ip_res:
-                            console.print(f"  {ip_res.get('ip')} - {ip_res.get('country')}, {ip_res.get('city')}")
-                else:
-                    console.print(f"  Error: {res['error']}")
-        else:
+        if not result["success"]:
             console.print(f"[red]Error: {result['error']}[/red]")
+            raise typer.Exit(1)
+        for item in result["results"]:
+            phone = item["phone"]
+            res = item["result"]
+            console.print(f"\n[cyan]{phone}:[/cyan]")
+            if res["success"]:
+                for ip, ip_res in res["results"].items():
+                    if "error" not in ip_res:
+                        console.print(f"  {location_line(ip, ip_res)}")
+            else:
+                console.print(f"  Error: {res['error']}")
 
-    asyncio.run(run_bulk())
+    asyncio.run(run())
+
 
 @app.command(name="continuous-mode")
 def continuous_mode(
     phone_file: str = typer.Argument(..., help="File with phone numbers"),
-    capture_time: int = typer.Option(2, "--seconds", "-t", help="Capture duration"),
-    interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use")
+    capture_time: int = typer.Option(CAPTURE_TIMEOUT, "--seconds", "-t", help="Capture duration"),
+    interface: Optional[str] = typer.Option(None, "--interface", "-i", help="Network interface to use"),
 ):
-    """Continuous mode - hunt from file"""
+    """Hunt every number in a file via the WhatsApp Desktop app."""
+    chosen = resolve_interface(interface)
 
-    if not interface:
-        interfaces = get_available_interfaces()
-        wifi_iface = next(
-            (iface for iface, desc in interfaces.items() 
-             if ("WiFi" in desc or "WLAN" in desc or "192.168." in desc) and "0.0.0.0" not in desc), None
-        )
-        if wifi_iface:
-            interface = wifi_iface
-        else:
-            interface = next((iface for iface in interfaces.keys() if not iface.startswith("lo") and "0.0.0.0" not in interfaces[iface]), list(interfaces.keys())[0])
-
-    async def run_continuous():
-        orchestrator = WhatsAppHunterOrchestrator(interface=interface, headless=True)
+    async def run():
+        orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
         result = await orchestrator.run_continuous_mode(phone_file, capture_time)
-
         if result["success"]:
             console.print("[green]Continuous hunt completed[/green]")
         else:
             console.print(f"[red]Error: {result['error']}[/red]")
+            raise typer.Exit(1)
 
-    asyncio.run(run_continuous())
+    asyncio.run(run())
+
 
 @app.command()
 def interfaces():
     """List available network interfaces"""
-    interfaces = get_available_interfaces()
+    found = get_available_interfaces()
     table = Table(title="Available Network Interfaces")
     table.add_column("Interface", style="cyan")
     table.add_column("Description", style="green")
-
-    for iface, desc in interfaces.items():
+    for iface, desc in found.items():
         table.add_row(iface, desc)
-
     console.print(table)
+
 
 if __name__ == "__main__":
     app()

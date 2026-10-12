@@ -16,22 +16,25 @@ class GeoLocationService:
         self.db_path = db_path or GEOLITE_DB_PATH
         self.backup_service = backup_service or BACKUP_GEO_SERVICE
         self._reader = None
+        self._db_checked = False
         self._session = None
         self._cache = {}
         self._cache_expiry = {}
         self.cache_ttl = timedelta(hours=24)
         
     def _initialize_reader(self):
-        if self._reader is None:
-            try:
-                db_path = Path(self.db_path)
-                if db_path.exists():
-                    self._reader = geoip2.database.Reader(str(db_path))
-                    logger.info(f"Loaded MaxMind database from {self.db_path}")
-                else:
-                    logger.warning(f"MaxMind database not found at {self.db_path}")
-            except Exception as e:
-                logger.error(f"Failed to load MaxMind database: {e}")
+        if self._db_checked:
+            return
+        self._db_checked = True
+        try:
+            db_path = Path(self.db_path)
+            if db_path.exists():
+                self._reader = geoip2.database.Reader(str(db_path))
+                logger.info(f"Loaded MaxMind database from {self.db_path}")
+            else:
+                logger.warning(f"MaxMind database not found at {self.db_path}, using online lookup")
+        except Exception as e:
+            logger.error(f"Failed to load MaxMind database: {e}")
                 
     def _get_session(self):
         if self._session is None:
@@ -115,13 +118,15 @@ class GeoLocationService:
     async def _lookup_online(self, ip: str) -> Dict:
         session = self._get_session()
         
-        apis = [
-            f"https://geoip.maxmind.com/geoip/v2.0/insights/{ip}",
+        apis = []
+        if MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY:
+            apis.append(f"https://geoip.maxmind.com/geoip/v2.1/insights/{ip}")
+        apis.extend([
             f"{self.backup_service}/{ip}",
             f"https://ipinfo.io/{ip}/json",
             f"https://api.ipgeolocation.io/ipgeo?apiKey=demo&ip={ip}",
             f"http://www.geoplugin.net/json.g?ip={ip}"
-        ]
+        ])
         
         for api_url in apis:
             try:
@@ -173,19 +178,39 @@ class GeoLocationService:
                 "source": "maxmind_official"
             }
         
-        # Handle other APIs
-        ip = data.get("ip", data.get("query", data.get("ipAddress")))
-        
-        country = data.get("country", data.get("countryName", data.get("country_name")))
-        country_code = data.get("countryCode", data.get("country_code"))
-        city = data.get("city", data.get("regionName"))
-        lat = data.get("lat", data.get("latitude"))
-        lon = data.get("lon", data.get("longitude"))
-        timezone = data.get("timezone", data.get("tz"))
-        asn = data.get("as", data.get("org"))
-        
-        lat_value = float(lat) if lat and lat.replace('.','',1).isdigit() else None
-        lon_value = float(lon) if lon and lon.replace('.','',1).isdigit() else None
+        if data.get("status") == "fail":
+            return None
+
+        def first(*keys):
+            for key in keys:
+                value = data.get(key)
+                if value not in (None, ""):
+                    return value
+            return None
+
+        ip = first("ip", "query", "ipAddress")
+        country = first("country_name", "countryName", "geoplugin_countryName", "country")
+        country_code = first("countryCode", "country_code", "geoplugin_countryCode")
+        if country_code is None and isinstance(country, str) and len(country) == 2:
+            country_code = country
+            country = None
+        city = first("city", "geoplugin_city", "regionName")
+        loc = data.get("loc")
+        lat = first("lat", "latitude", "geoplugin_latitude")
+        lon = first("lon", "longitude", "geoplugin_longitude")
+        if isinstance(loc, str) and "," in loc:
+            lat, lon = loc.split(",", 1)
+        timezone = first("timezone", "tz", "geoplugin_timezone")
+        asn = first("as", "org")
+
+        def _coord(value):
+            try:
+                return float(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        lat_value = _coord(lat)
+        lon_value = _coord(lon)
         
         if country or country_code or city:
             return {

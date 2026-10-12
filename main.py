@@ -1,5 +1,8 @@
+from src.cli import app
+
+
 def main():
-    print("Hello from whatsup-now!")
+    app()
 
 
 if __name__ == "__main__":

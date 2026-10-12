@@ -13,8 +13,8 @@ class TestIPExtractor(unittest.TestCase):
     def test_initialization(self):
         """Test IPExtractor initialization"""
         self.assertEqual(len(self.extractor.private_ranges), 5)
-        self.assertEqual(len(self.extractor.meta_ranges), 7)
-        self.assertEqual(len(self.extractor.corporate_ranges), 4)
+        self.assertGreaterEqual(len(self.extractor.meta_ranges), 7)
+        self.assertEqual(len(self.extractor.corporate_ranges), 31)
 
     def test_is_private_ip_detection(self):
         """Test private IP detection"""

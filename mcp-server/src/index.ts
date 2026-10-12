@@ -15,9 +15,8 @@ const PYTHON_PATH = "E:\\whatsup_now\\.venv\\Scripts\\python.exe";
 // Tool input schemas
 const HuntIPSchema = z.object({
   phone_number: z.string().describe("Target phone number in international format (e.g., +1234567890)"),
-  capture_time: z.number().optional().default(5).describe("Capture duration in seconds"),
+  capture_time: z.number().optional().default(30).describe("Capture duration in seconds"),
   interface: z.string().optional().describe("Network interface to use"),
-  headless: z.boolean().optional().default(true).describe("Run browser in headless mode"),
 });
 
 const BulkHuntSchema = z.object({
@@ -108,11 +107,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             interface: {
               type: "string",
               description: "Network interface to use (optional, auto-detected if not specified)",
-            },
-            headless: {
-              type: "boolean",
-              description: "Run browser in headless mode",
-              default: true,
             },
           },
           required: ["phone_number"],
@@ -207,9 +201,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ];
         if (params.interface) {
           cliArgs.push("--interface", params.interface);
-        }
-        if (!params.headless) {
-          cliArgs.push("--no-head");
         }
 
         const result = await runPythonCommand(cliArgs);
