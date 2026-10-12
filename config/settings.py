@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 CAPTURE_TIMEOUT = int(os.getenv("CAPTURE_TIMEOUT", "30"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "999"))
 RATE_LIMIT_DELAY = int(os.getenv("RATE_LIMIT_DELAY", "0"))
 
 # Geolocation settings

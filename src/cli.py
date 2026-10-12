@@ -16,6 +16,15 @@ app = typer.Typer()
 console = Console()
 
 
+def _run_async(coro):
+    """Run a single async coroutine, reusing a running loop when available."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return loop.run_until_complete(coro)
+
+
 def resolve_interface(interface: Optional[str]) -> str:
     if interface:
         return interface
@@ -82,7 +91,7 @@ def hunt(
         orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
         print_results("IP Hunt Results", await orchestrator.run_hunt(phone_number, capture_time))
 
-    asyncio.run(run())
+    _run_async(run())
 
 
 @app.command()
@@ -97,7 +106,7 @@ def capture(
         orchestrator = WhatsAppHunterOrchestrator(interface=chosen)
         print_results("Captured IP Results", await orchestrator.run_capture(capture_time))
 
-    asyncio.run(run())
+    _run_async(run())
 
 
 @app.command()
@@ -126,7 +135,7 @@ def bulk_hunt(
             else:
                 console.print(f"  Error: {res['error']}")
 
-    asyncio.run(run())
+    _run_async(run())
 
 
 @app.command(name="continuous-mode")
@@ -147,7 +156,7 @@ def continuous_mode(
             console.print(f"[red]Error: {result['error']}[/red]")
             raise typer.Exit(1)
 
-    asyncio.run(run())
+    _run_async(run())
 
 
 @app.command()

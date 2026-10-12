@@ -1,10 +1,10 @@
 import threading
 import time
-from scapy.all import sniff, IP, UDP, Raw
-from src.ip_extractor import STUN_MAGIC_COOKIE
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from rich.console import Console
 from rich.table import Table
+
+from src.ip_extractor import STUN_MAGIC_COOKIE, STUN_PORTS
 
 console = Console()
 
@@ -20,6 +20,7 @@ class PacketCaptureEngine:
         self.capture_active = False
         self.packets: List = []
         self.capture_thread: Optional[threading.Thread] = None
+        self._stun_packets: Optional[List] = None
 
     @staticmethod
     def get_available_interfaces() -> Dict[str, str]:
@@ -37,8 +38,11 @@ class PacketCaptureEngine:
 
     def start_capture(self, duration: int = 10):
         """Start packet capture for specified duration."""
+        from scapy.all import sniff
+
         self.capture_active = True
         self.packets = []
+        self._stun_packets = None
 
         def capture_worker():
             try:
@@ -68,19 +72,28 @@ class PacketCaptureEngine:
 
     def get_stun_packets(self) -> List:
         """Extract STUN-related packets from captured data."""
+        from scapy.all import IP, IPv6, UDP, Raw
+
+        if self._stun_packets is not None:
+            return self._stun_packets
+
         stun_packets = []
         for packet in self.packets:
-            if packet.haslayer(UDP) and packet.haslayer(IP):
+            if packet.haslayer(UDP) and (packet.haslayer(IP) or packet.haslayer(IPv6)):
                 sport = packet[UDP].sport
                 dport = packet[UDP].dport
 
-                if 3478 <= sport <= 60000 or 3478 <= dport <= 60000:
-                    if packet.haslayer(Raw):
-                        payload = bytes(packet[Raw].load)
-                        # STUN magic cookie is at bytes 4-8 of the header.
-                        if len(payload) >= 8 and payload[4:8] == STUN_MAGIC_COOKIE:
-                            stun_packets.append(packet)
+                if sport in STUN_PORTS or dport in STUN_PORTS:
+                    if not packet.haslayer(Raw):
+                        stun_packets.append(packet)
+                        continue
+                    payload = bytes(packet[Raw].load)
+                    if len(payload) >= 8 and payload[4:8] == STUN_MAGIC_COOKIE:
+                        stun_packets.append(packet)
+                    elif len(payload) >= 4 and (payload[0] & 0xC0) == 0x40:
+                        stun_packets.append(packet)
 
+        self._stun_packets = stun_packets
         return stun_packets
 
     def get_candidate_ips(self) -> List[str]:
@@ -124,13 +137,12 @@ class PacketCaptureEngine:
         for ip in set(raw_ips):
             classified[ip] = extractor.classify_ip(ip)
 
-        flows: List[str] = []
+        flows: Set[str] = set()
         for p in stun_packets:
-            ip_l = p[IP]
+            from scapy.all import IP, IPv6, UDP
+            ip_l = p[IPv6] if p.haslayer(IPv6) else p[IP]
             udp_l = p[UDP]
-            label = f"{ip_l.src}:{udp_l.sport} -> {ip_l.dst}:{udp_l.dport}"
-            if label not in flows:
-                flows.append(label)
+            flows.add(f"[{ip_l.src}]:{udp_l.sport} -> [{ip_l.dst}]:{udp_l.dport}")
 
         return {
             "total_packets": total,
@@ -138,7 +150,7 @@ class PacketCaptureEngine:
             "raw_ips": sorted(set(raw_ips)),
             "classified": classified,
             "targets": extractor.filter_target_ips(set(raw_ips)),
-            "stun_flows": flows,
+            "stun_flows": sorted(flows),
         }
 
 

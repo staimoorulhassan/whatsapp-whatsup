@@ -8,12 +8,6 @@ from urllib.parse import urlparse
 import base64
 from io import BytesIO
 
-try:
-    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
-except ImportError:
-    print("Playwright not installed. Install with: pip install playwright")
-    raise
-
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -38,9 +32,9 @@ class WhatsAppClient:
         self.session_dir.mkdir(exist_ok=True)
         self.headless = headless
 
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self.browser = None
+        self.context = None
+        self.page = None
 
         self.playwright = None
         self.logged_in = False
@@ -52,6 +46,11 @@ class WhatsAppClient:
     async def initialize(self) -> bool:
         """Initialize browser and prepare for WhatsApp Web"""
         try:
+            from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+            self._page_type = Page
+            self._browser_type = Browser
+            self._context_type = BrowserContext
+
             self.playwright = await async_playwright().start()
 
             # Launch browser with optimized settings for speed

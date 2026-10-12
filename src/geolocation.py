@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import aiohttp
 import geoip2.database
 import geoip2.errors
@@ -11,6 +12,36 @@ from config.settings import GEOLITE_DB_PATH, BACKUP_GEO_SERVICE, MAXMIND_ACCOUNT
 
 logger = logging.getLogger(__name__)
 
+
+class _TTLCache:
+    """Simple in-memory cache with TTL and optional size cap."""
+
+    def __init__(self, ttl: timedelta, maxsize: int = 1000):
+        self.ttl = ttl
+        self.maxsize = maxsize
+        self._data: Dict[str, Dict] = {}
+
+    def _evict_if_needed(self):
+        if len(self._data) < self.maxsize:
+            return
+        # Evict oldest entries by insertion order until we are under the limit.
+        while len(self._data) >= self.maxsize:
+            self._data.pop(next(iter(self._data)), None)
+
+    def get(self, key: str) -> Optional[Dict]:
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        if datetime.now() > entry["expires"]:
+            del self._data[key]
+            return None
+        return entry["value"]
+
+    def set(self, key: str, value: Dict):
+        self._evict_if_needed()
+        self._data[key] = {"value": value, "expires": datetime.now() + self.ttl}
+
+
 class GeoLocationService:
     def __init__(self, db_path: str = None, backup_service: str = None):
         self.db_path = db_path or GEOLITE_DB_PATH
@@ -18,10 +49,9 @@ class GeoLocationService:
         self._reader = None
         self._db_checked = False
         self._session = None
-        self._cache = {}
-        self._cache_expiry = {}
+        self._cache = _TTLCache(timedelta(hours=24), maxsize=1000)
         self.cache_ttl = timedelta(hours=24)
-        
+
     def _initialize_reader(self):
         if self._db_checked:
             return
@@ -35,25 +65,21 @@ class GeoLocationService:
                 logger.warning(f"MaxMind database not found at {self.db_path}, using online lookup")
         except Exception as e:
             logger.error(f"Failed to load MaxMind database: {e}")
-                
+
     def _get_session(self):
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         return self._session
-        
+
     async def lookup_single(self, ip: str) -> Dict:
         cache_key = f"geo:{ip}"
-        now = datetime.now()
-        
-        if cache_key in self._cache and cache_key in self._cache_expiry:
-            if now < self._cache_expiry[cache_key]:
-                return self._cache[cache_key]
-        
+
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         result = await self._lookup_internal(ip)
-        
-        self._cache[cache_key] = result
-        self._cache_expiry[cache_key] = now + self.cache_ttl
-        
+        self._cache.set(cache_key, result)
         return result
         
     async def lookup_bulk(self, ips: List[str]) -> Dict[str, Dict]:
@@ -117,7 +143,7 @@ class GeoLocationService:
             
     async def _lookup_online(self, ip: str) -> Dict:
         session = self._get_session()
-        
+
         apis = []
         if MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY:
             apis.append(f"https://geoip.maxmind.com/geoip/v2.1/insights/{ip}")
@@ -127,28 +153,36 @@ class GeoLocationService:
             f"https://api.ipgeolocation.io/ipgeo?apiKey=demo&ip={ip}",
             f"http://www.geoplugin.net/json.g?ip={ip}"
         ])
-        
-        for api_url in apis:
+
+        async def fetch(api_url: str):
+            headers = {}
+            if "maxmind.com" in api_url:
+                credentials = f"{MAXMIND_ACCOUNT_ID}:{MAXMIND_LICENSE_KEY}"
+                encoded_credentials = base64.b64encode(credentials.encode()).decode()
+                headers["Authorization"] = f"Basic {encoded_credentials}"
             try:
-                headers = {}
-                if "maxmind.com" in api_url:
-                    import base64
-                    credentials = f"{MAXMIND_ACCOUNT_ID}:{MAXMIND_LICENSE_KEY}"
-                    encoded_credentials = base64.b64encode(credentials.encode()).decode()
-                    headers["Authorization"] = f"Basic {encoded_credentials}"
-                
                 async with session.get(api_url, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        normalized = self._normalize_response(data, api_url)
-                        if normalized:
-                            return normalized
-                        
+                    if response.status != 200:
+                        return None
+                    data = await response.json()
+                    return self._normalize_response(data, api_url)
             except Exception as e:
                 logger.debug(f"API lookup failed ({api_url}): {e}")
-                continue
-                
+                return None
+
+        # Race the APIs and take the first successful, normalized response.
+        pending = {asyncio.ensure_future(fetch(url)): url for url in apis}
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                normalized = await task
+                if normalized:
+                    for remaining in pending:
+                        remaining.cancel()
+                    return normalized
+
         return {
             "ip": ip,
             "country": None,

@@ -1,10 +1,11 @@
+import functools
 import ipaddress
 import struct
 from typing import List, Dict, Optional, Set
-from scapy.all import IP, UDP, Raw
 
 STUN_MAGIC_COOKIE = b'\x21\x12\xa4\x42'
 STUN_MAGIC_COOKIE_INT = 0x2112a442
+STUN_PORTS = {3478, 3479, 5349, 5350, 19302}
 
 # STUN attribute types
 STUN_ATTR_MAPPED_ADDRESS = 0x0001
@@ -30,74 +31,73 @@ class IPExtractor:
     Focuses on STUN protocol analysis to discover target IP addresses.
     """
 
+    _PRIVATE_CIDRS = (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+    )
+    _META_CIDRS = (
+        "31.13.0.0/16",
+        "157.240.0.0/16",
+        "185.60.216.0/22",
+        "179.6.0.0/16",
+        "102.133.0.0/16",
+        "158.168.0.0/16",
+        "148.113.0.0/16",
+        "57.144.0.0/14",
+        "57.141.0.0/16",
+        "69.63.176.0/20",
+        "69.171.224.0/19",
+        "66.220.144.0/20",
+        "173.252.64.0/18",
+        "129.134.0.0/16",
+        "163.70.128.0/17",
+        "204.15.20.0/22",
+        "45.64.40.0/22",
+        "103.4.96.0/22",
+    )
+    _CORPORATE_CIDRS = (
+        "8.8.8.0/24",
+        "8.8.4.0/24",
+        "1.1.1.0/24",
+        "9.9.9.0/24",
+        "142.250.0.0/15",
+        "172.217.0.0/16",
+        "216.58.192.0/19",
+        "74.125.0.0/16",
+        "173.194.0.0/16",
+        "209.85.128.0/17",
+        "64.233.160.0/19",
+        "66.102.0.0/20",
+        "108.177.0.0/17",
+        "172.253.0.0/16",
+        "142.251.0.0/16",
+        "104.16.0.0/13",
+        "172.64.0.0/13",
+        "162.158.0.0/15",
+        "141.101.64.0/18",
+        "188.114.96.0/20",
+        "190.93.240.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "131.0.72.0/22",
+        "64.68.96.0/19",
+        "216.93.246.0/24",
+        "66.151.32.0/21",
+    )
+
     def __init__(self):
-        # Private IP ranges (5)
-        self.private_ranges = [
-            "10.0.0.0/8",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-            "127.0.0.0/8",
-            "169.254.0.0/16"
-        ]
+        self.private_ranges = [ipaddress.ip_network(r, strict=False) for r in self._PRIVATE_CIDRS]
+        self.meta_ranges = [ipaddress.ip_network(r, strict=False) for r in self._META_CIDRS]
+        self.corporate_ranges = [ipaddress.ip_network(r, strict=False) for r in self._CORPORATE_CIDRS]
 
-        # Meta/Facebook infrastructure IP ranges (7)
-        self.meta_ranges = [
-            "31.13.0.0/16",      # Meta/Facebook
-            "157.240.0.0/16",    # Meta/Facebook
-            "185.60.216.0/22",   # Meta/Facebook UK infrastructure
-            "179.6.0.0/16",      # Meta Brazil infrastructure
-            "102.133.0.0/16",    # Meta APAC
-            "158.168.0.0/16",    # Meta (secondary)
-            "148.113.0.0/16",    # Meta/Carrier
-            "57.144.0.0/14",     # Meta (AS32934)
-            "57.141.0.0/16",
-            "69.63.176.0/20",
-            "69.171.224.0/19",
-            "66.220.144.0/20",
-            "173.252.64.0/18",
-            "129.134.0.0/16",
-            "163.70.128.0/17",
-            "204.15.20.0/22",
-            "45.64.40.0/22",
-            "103.4.96.0/22",
-        ]
-
-        # DNS, CDN, and well-known STUN/TURN providers. These show up on
-        # every call and are not the remote peer.
-        self.corporate_ranges = [
-            "8.8.8.0/24",
-            "8.8.4.0/24",
-            "1.1.1.0/24",
-            "9.9.9.0/24",
-            "142.250.0.0/15",
-            "172.217.0.0/16",
-            "216.58.192.0/19",
-            "74.125.0.0/16",
-            "173.194.0.0/16",
-            "209.85.128.0/17",
-            "64.233.160.0/19",
-            "66.102.0.0/20",
-            "108.177.0.0/17",
-            "172.253.0.0/16",
-            "142.251.0.0/16",
-            "104.16.0.0/13",
-            "172.64.0.0/13",
-            "162.158.0.0/15",
-            "141.101.64.0/18",
-            "188.114.96.0/20",
-            "190.93.240.0/20",
-            "197.234.240.0/22",
-            "198.41.128.0/17",
-            "173.245.48.0/20",
-            "103.21.244.0/22",
-            "103.22.200.0/22",
-            "103.31.4.0/22",
-            "131.0.72.0/22",
-            "64.68.96.0/19",
-            "216.93.246.0/24",
-            "66.151.32.0/21",
-        ]
-
+    @functools.lru_cache(maxsize=4096)
     def classify_ip(self, ip: str) -> str:
         """Classify an IP address into a category."""
         try:
@@ -105,25 +105,18 @@ class IPExtractor:
         except (ValueError, TypeError):
             return "invalid"
 
-        # Check loopback, multicast, unspecified
         if ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_unspecified:
             return "private"
 
-        # Check private ranges
-        for range_str in self.private_ranges:
-            network = ipaddress.ip_network(range_str, strict=False)
+        for network in self.private_ranges:
             if ip_obj in network:
                 return "private"
 
-        # Check Meta infrastructure ranges
-        for range_str in self.meta_ranges:
-            network = ipaddress.ip_network(range_str, strict=False)
+        for network in self.meta_ranges:
             if ip_obj in network:
                 return "meta_infrastructure"
 
-        # Check corporate/CDN ranges
-        for range_str in self.corporate_ranges:
-            network = ipaddress.ip_network(range_str, strict=False)
+        for network in self.corporate_ranges:
             if ip_obj in network:
                 return "corporate"
 
@@ -178,6 +171,8 @@ class IPExtractor:
         counts: Dict[str, int] = {}
         for packet in packets:
             for ip in self._receiver_candidates(packet):
+                counts[ip] = counts.get(ip, 0) + 2
+            for ip in self._peer_from_headers(packet):
                 counts[ip] = counts.get(ip, 0) + 1
 
         if not counts:
@@ -186,42 +181,56 @@ class IPExtractor:
         best = max(counts.values())
         return [ip for ip, n in counts.items() if n == best]
 
+    def _ip_layer(self, packet):
+        from scapy.all import IP, IPv6
+
+        if packet.haslayer(IPv6):
+            return packet[IPv6]
+        if packet.haslayer(IP):
+            return packet[IP]
+        return None
+
     def _receiver_candidates(self, packet) -> List[str]:
+        from scapy.all import IP, IPv6, UDP, Raw
+
         if packet is None or not hasattr(packet, "haslayer"):
             return []
-        if not (packet.haslayer(IP) and packet.haslayer(UDP) and packet.haslayer(Raw)):
+        ip_layer = self._ip_layer(packet)
+        if ip_layer is None or not packet.haslayer(UDP) or not packet.haslayer(Raw):
             return []
         try:
             payload = bytes(packet[Raw].load)
             if len(payload) < 20 or payload[4:8] != STUN_MAGIC_COOKIE:
                 return []
             msg_type = struct.unpack("!H", payload[:2])[0] & 0x3FFF
-            src = ipaddress.ip_address(packet[IP].src)
-            outbound = src.is_private or src.is_loopback
-            if msg_type == 0x0001 and outbound:
-                return [packet[IP].dst]
-            if msg_type == 0x0101 and not outbound:
-                return [packet[IP].src]
+            src = ipaddress.ip_address(ip_layer.src)
+            dst = ipaddress.ip_address(ip_layer.dst)
+            outbound = src.is_private or src.is_loopback or src.is_link_local
+            inbound = dst.is_private or dst.is_loopback or dst.is_link_local
+            if msg_type == 0x0001 and (outbound or not dst.is_private):
+                return [str(dst)]
+            if msg_type == 0x0101 and (inbound or not src.is_private):
+                return [str(src)]
         except Exception:
             return []
         return []
 
     def _peer_from_headers(self, packet) -> List[str]:
         """Remote address only. Local source and STUN server ports are not the peer."""
+        from scapy.all import IP, IPv6, UDP
+
         if packet is None or not hasattr(packet, "haslayer"):
             return []
-        if not (packet.haslayer(IP) and packet.haslayer(UDP)):
+        ip_layer = self._ip_layer(packet)
+        if ip_layer is None or not packet.haslayer(UDP):
             return []
         try:
-            src = packet[IP].src
-            dst = packet[IP].dst
+            src = ip_layer.src
+            dst = ip_layer.dst
             sport = packet[UDP].sport
             dport = packet[UDP].dport
-            stun_ports = {3478, 3479, 5349, 5350}
-            if sport in stun_ports or dport in stun_ports:
-                return []
             local = ipaddress.ip_address(src)
-            remote = dst if (local.is_private or local.is_loopback) else src
+            remote = dst if (local.is_private or local.is_loopback or local.is_link_local) else src
             return [remote] if self._is_valid_ip(remote) else []
         except Exception:
             return []
@@ -235,9 +244,10 @@ class IPExtractor:
             if not hasattr(packet, 'haslayer'):
                 return []
 
-            if packet.haslayer(IP):
-                src_ip = packet[IP].src
-                dst_ip = packet[IP].dst
+            ip_layer = self._ip_layer(packet)
+            if ip_layer is not None:
+                src_ip = ip_layer.src
+                dst_ip = ip_layer.dst
 
                 results = []
                 for ip in [src_ip, dst_ip]:
@@ -251,6 +261,8 @@ class IPExtractor:
 
     def _extract_from_stun_payload(self, packet) -> List[str]:
         """Extract IPs from STUN packet payloads."""
+        from scapy.all import IP, IPv6, UDP, Raw
+
         if packet is None:
             return []
 
@@ -267,12 +279,12 @@ class IPExtractor:
                     return self._parse_stun_attributes(payload)
 
             # Also check IP layer for STUN-like traffic
-            if packet.haslayer(IP) and packet.haslayer(UDP):
+            if self._ip_layer(packet) is not None and packet.haslayer(UDP):
                 sport = packet[UDP].sport
                 dport = packet[UDP].dport
 
                 # STUN ports range
-                if (sport >= 3478 and sport <= 65535) or (dport >= 3478 and dport <= 65535):
+                if sport in STUN_PORTS or dport in STUN_PORTS:
                     if packet.haslayer(Raw):
                         payload = bytes(packet[Raw].load)
                         if len(payload) >= 2:
@@ -329,10 +341,11 @@ class IPExtractor:
                     if ip:
                         ips.append(ip)
 
-                # Move to next attribute (padded to 4 bytes)
+                # Move to next attribute (padded to 4-byte boundary)
                 offset += 4 + attr_length
-                if attr_length % 2 == 1:
-                    offset += 1
+                padding = attr_length % 4
+                if padding:
+                    offset += 4 - padding
 
         except Exception:
             pass

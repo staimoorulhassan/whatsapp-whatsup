@@ -80,6 +80,12 @@ class WhatsAppHunterOrchestrator:
 
         if not classified:
             console.print("[yellow]Packets captured but no readable IPs.[/yellow]")
+            flows = diag.get("stun_flows") or []
+            if flows:
+                console.print(Panel.fit(
+                    "[bold]STUN flows[/bold]\n" + "\n".join(f"[cyan]{f}[/cyan]" for f in flows[:20]),
+                    border_style="dim"
+                ))
             return
 
         tbl = Table(title="IP classification")
@@ -181,10 +187,15 @@ class WhatsAppHunterOrchestrator:
 
     async def run_continuous_mode(self, phone_file: str, capture_duration: int = None) -> Dict:
         try:
-            with open(phone_file, "r") as f:
-                phones = [line.strip() for line in f if line.strip()]
+            lines = await asyncio.to_thread(self._read_phone_file, phone_file)
+            phones = [line.strip() for line in lines if line.strip()]
             return await self.run_bulk_hunt(phones, capture_duration)
         except FileNotFoundError:
             return {"success": False, "error": f"File not found: {phone_file}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _read_phone_file(phone_file: str) -> List[str]:
+        with open(phone_file, "r", encoding="utf-8") as f:
+            return f.readlines()
